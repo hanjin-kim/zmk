@@ -4,39 +4,74 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/util.h>
 #include <zmk/matrix_transform.h>
 #include <zmk/matrix.h>
 #include <dt-bindings/zmk/matrix_transform.h>
 
-#ifdef ZMK_KEYMAP_TRANSFORM_NODE
+#define DT_DRV_COMPAT zmk_matrix_transform
 
-/* the transform in the device tree is a list of (row,column) pairs that is
- * indexed by by the keymap position of that key. We want to invert this in
- * order to be able to quickly determine what keymap position a particular
- * row,column pair is associated with, using a single lookup.
- *
- * We do this by creating the `transform` array at compile time, which is
- * indexed by (row * ZMK_MATRIX_COLS) + column, and the value contains an
- * encoded keymap index it is associated with. The keymap index is encoded
- * by adding INDEX_OFFSET to it, because not all row,column pairs have an
- * associated keymap index (some matrices are sparse), C globals are
- * initialized to 0, and the keymap index of 0 is a valid index. We want to
- * be able to detect the condition when an unassigned matrix position is
- * pressed and we want to return an error.
- */
+struct zmk_matrix_transform_entry {
+    uint16_t row;
+    uint16_t column;
+};
 
-#define INDEX_OFFSET 1
+struct zmk_matrix_transform {
+    const struct zmk_matrix_transform_entry *entries;
+    size_t entries_len;
+};
 
-#define TRANSFORM_ENTRY(i, _)                                                                      \
-    [(KT_ROW(DT_PROP_BY_IDX(ZMK_KEYMAP_TRANSFORM_NODE, map, i)) * ZMK_MATRIX_COLS) +               \
-        KT_COL(DT_PROP_BY_IDX(ZMK_KEYMAP_TRANSFORM_NODE, map, i))] = i + INDEX_OFFSET
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_matrix_transform)
 
-static uint32_t transform[] = {LISTIFY(ZMK_KEYMAP_LEN, TRANSFORM_ENTRY, (, ), 0)};
+#define ZMK_KEYMAP_TRANSFORM_NODE DT_CHOSEN(zmk_matrix_transform)
 
-#endif
+#define TRANSFORM_ENTRY(i, n)                                                                      \
+    {                                                                                              \
+        .row = KT_ROW(DT_INST_PROP_BY_IDX(n, map, i)),                                             \
+        .column = KT_COL(DT_INST_PROP_BY_IDX(n, map, i))                                           \
+    }
 
-int32_t zmk_matrix_transform_row_column_to_position(uint32_t row, uint32_t column) {
+#define MATRIX_TRANSFORM_INIT(n)                                                                   \
+    static const struct zmk_matrix_transform_entry _CONCAT(zmk_transform_entries_,                 \
+                                                           n)[DT_INST_PROP_LEN(n, map)] = {        \
+        LISTIFY(DT_INST_PROP_LEN(n, map), TRANSFORM_ENTRY, (, ), n)};                              \
+    const struct zmk_matrix_transform _CONCAT(zmk_matrix_transform_, DT_DRV_INST(n)) = {           \
+        .entries = _CONCAT(zmk_transform_entries_, n),                                             \
+        .entries_len = DT_INST_PROP_LEN(n, map),                                                   \
+    };
+
+DT_INST_FOREACH_STATUS_OKAY(MATRIX_TRANSFORM_INIT);
+
+#elif DT_HAS_CHOSEN(zmk_kscan)
+
+static struct zmk_matrix_transform_entry zmk_transform_entries_default[ZMK_KEYMAP_LEN] = {};
+
+const struct zmk_matrix_transform zmk_matrix_transform_default = {
+    .entries = zmk_transform_entries_default,
+    .entries_len = ZMK_KEYMAP_LEN,
+};
+
+static int init_synth_matrix_transform(void) {
+    for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+        zmk_transform_entries_default[i] = (struct zmk_matrix_transform_entry){
+            .row = (i / ZMK_MATRIX_COLS), .column = (i % ZMK_MATRIX_COLS)};
+    }
+
+    return 0;
+}
+
+SYS_INIT(init_synth_matrix_transform, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+
+#else
+
+#error "Need a matrix tranform or compatible kscan selected to determine keymap size!"
+
+#endif // DT_HAS_COMPAT_STATUS_OKAY(zmk_matrix_transform)
+
+int32_t zmk_matrix_transform_row_column_to_position(zmk_matrix_transform_t mt, uint32_t row,
+                                                    uint32_t column) {
 #if DT_NODE_HAS_PROP(ZMK_KEYMAP_TRANSFORM_NODE, col_offset)
     column += DT_PROP(ZMK_KEYMAP_TRANSFORM_NODE, col_offset);
 #endif
@@ -45,21 +80,21 @@ int32_t zmk_matrix_transform_row_column_to_position(uint32_t row, uint32_t colum
     row += DT_PROP(ZMK_KEYMAP_TRANSFORM_NODE, row_offset);
 #endif
 
-    const uint32_t matrix_index = (row * ZMK_MATRIX_COLS) + column;
-
 #ifdef ZMK_KEYMAP_TRANSFORM_NODE
-    if (matrix_index >= ARRAY_SIZE(transform)) {
-        return -EINVAL;
+
+    for (int i = 0; i < mt->entries_len; i++) {
+        const struct zmk_matrix_transform_entry *entry = &mt->entries[i];
+
+        if (entry->row == row && entry->column == column) {
+            return i;
+        }
     }
 
-    const uint32_t value = transform[matrix_index];
+    return -EINVAL;
 
-    if (!value) {
-        return -EINVAL;
-    }
-
-    return value - INDEX_OFFSET;
 #else
-    return matrix_index;
+
+    return (row * ZMK_MATRIX_COLS) + column;
+
 #endif /* ZMK_KEYMAP_TRANSFORM_NODE */
 };
