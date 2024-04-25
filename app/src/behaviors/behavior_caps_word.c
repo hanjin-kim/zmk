@@ -106,7 +106,9 @@ static bool caps_word_is_caps_includelist(const struct behavior_caps_word_config
 }
 
 static bool caps_word_is_alpha(uint8_t usage_id) {
-    return (usage_id >= HID_USAGE_KEY_KEYBOARD_A && usage_id <= HID_USAGE_KEY_KEYBOARD_Z);
+    return (usage_id >= HID_USAGE_KEY_KEYBOARD_A && usage_id <= HID_USAGE_KEY_KEYBOARD_Z)
+        // explicitly for colemak on mac
+        || usage_id == HID_USAGE_KEY_KEYBOARD_SEMICOLON_AND_COLON;
 }
 
 static bool caps_word_is_numeric(uint8_t usage_id) {
